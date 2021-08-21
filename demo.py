@@ -1,63 +1,57 @@
+import argparse
 import json
-import logging
-import os
 import sys
 from datetime import datetime
+from enum import Enum
 
-import tornado.gen
-import tornado.ioloop
-from tornado.options import options
+from tornado.ioloop import IOLoop
 
 from bililive.exception import RoomDisconnectException, RoomNotFoundException
 from bililive.message import MessageType
 from bililive.room import LiveRoom
 
-log = logging.getLogger(__name__)
+
+class CoinType(str, Enum):
+    银瓜子 = "silver"
+    金瓜子 = "gold"
 
 
-class DebugRoom(LiveRoom):
-    """
-    重写消息分发器，收集数据样本
-    """
-
-    async def dispatch_message(self, msg: bytes):
-        if "DEBUG" in os.environ:
-            self.save_to_file(msg)
-        return await super().dispatch_message(msg)
-
-    def save_to_file(self, msg: bytes):
-        """将消息保存至文件"""
-        j = json.loads(msg)
-        cmd = j["cmd"]
-
-        if not os.path.exists(f"./data/{cmd}"):
-            os.makedirs(f"./data/{cmd}", exist_ok=True)
-
-        ts = datetime.now().timestamp()
-        with open(f"./data/{cmd}/{ts}.json", mode="wt") as fp:
-            json.dump(j, fp, indent=2, ensure_ascii=False)
+class GuardLevel(int, Enum):
+    无 = 0
+    总督 = 1
+    提督 = 2
+    舰长 = 3
 
 
-async def send_gift_hander(msg: bytes):
+room = LiveRoom()
+
+
+@room.on_message(MessageType.SEND_GIFT)
+async def gift_handler(msg: bytes):
     """礼物消息处理，异步方式"""
     j = json.loads(msg)
     data = j["data"]
 
-    action = data["action"]
     uid = data["uid"]
     uname = data["uname"]
+    guard_level = GuardLevel(data["guard_level"])
+
     gift_id = data["giftId"]
     gift_name = data["giftName"]
     gift_type = data["giftType"]
-    price = data["price"]
+    coin_type = CoinType(data["coin_type"])
+    total_coin = data["total_coin"]
     num = data["num"]
 
     ts = data["timestamp"]
     dt = datetime.fromtimestamp(ts)
 
-    print(f"[{dt.time()}] {uname}({uid}) 赠送礼物 {gift_name}({num}) 价值 {price}")
+    print(
+        f"[{dt.time()}] [{guard_level.name}]{uname}({uid}) 赠送礼物 {gift_name}({num}) 价值 {total_coin:_} {coin_type.name}"
+    )
 
 
+@room.on_message(MessageType.DANMU_MSG)
 def danmu_handler(msg: bytes):
     """弹幕消息处理"""
     j = json.loads(msg)
@@ -73,21 +67,14 @@ def danmu_handler(msg: bytes):
 
 
 async def main():
-    options.define("room_id", 6, type=int, help="Room id of which you want listen.")
-    options.parse_command_line()
-
-    room_id: int = options["room_id"]
-    room = DebugRoom(room_id)
-
-    # 注册消息处理器
-    room.handle(MessageType.DANMU_MSG, danmu_handler)
-    room.handle(MessageType.SEND_GIFT, send_gift_hander)
+    parser = argparse.ArgumentParser(description="哔哩哔哩直播间弹幕检测工具")
+    parser.add_argument("room_id", type=int, metavar="room_id", help="直播间房号")
+    args = parser.parse_args()
+    room_id = args.room_id
 
     try:
         # 获取直播间信息
-        await room.update_info()
-
-        print(f"正在连接至直播间 {room.info.room_id}")
+        await room.update_info(room_id)
         print(room.info.title)
 
         # 连接直播间
@@ -101,6 +88,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        tornado.ioloop.IOLoop.current().run_sync(main)
+        IOLoop.current().run_sync(main)
     except KeyboardInterrupt:
         print("正在退出...")

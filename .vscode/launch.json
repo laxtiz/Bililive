@@ -11,8 +11,7 @@
             "program": "${workspaceFolder}/demo.py",
             "console": "integratedTerminal",
             "args": [
-                "--room-id=1314",
-                "--logging=debug"
+                "1314"
             ]
         }
     ]

@@ -1,4 +1,5 @@
 from enum import Enum
+from functools import singledispatch
 
 
 class MessageType(str, Enum):

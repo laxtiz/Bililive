@@ -1,10 +1,12 @@
 import json
 import logging
+import os
 import struct
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Awaitable, Callable, Coroutine, Dict, Union
+from typing import (Any, Awaitable, Callable, Coroutine, DefaultDict, Optional, Union)
 
 from tornado.httpclient import AsyncHTTPClient
 from tornado.ioloop import PeriodicCallback
@@ -19,9 +21,11 @@ MessageHandler = Callable[[Message], None]
 AsyncMessageHandler = Callable[[Message], Coroutine[Any, Any, None]]
 
 ROOM_INFO_API_URL = (
-    "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id={0}"
-)
+    "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id={0}")
 BROADCAST_LIVE_URL = "wss://broadcastlv.chat.bilibili.com:443/sub"
+
+LOGLEVEL = os.environ.get("LOGLEVEL", default="INFO")
+logging.basicConfig(level=LOGLEVEL)
 
 log = logging.getLogger("Bililive")
 
@@ -45,17 +49,15 @@ class LiveRoomInfo:
 
 class LiveRoom:
     _conn: WebSocketClientConnection
-    _heartbeat_timer: PeriodicCallback
-    _handlers: Dict[str, Union[MessageHandler, AsyncMessageHandler]]
+    _hb_timer: PeriodicCallback
+    _handlers: DefaultDict[str, Union[MessageHandler, AsyncMessageHandler]]
     room_or_short_id: int
     info: LiveRoomInfo
     hot: int = -1
 
-    def __init__(self, room_id: int) -> None:
-        self.room_or_short_id = room_id
-
-        self._handlers = dict()
-        self._heartbeat_timer = PeriodicCallback(self._heartbeat, callback_time=30_000)
+    def __init__(self) -> None:
+        self._handlers = defaultdict(lambda: self.discard_message)
+        self._hb_timer = PeriodicCallback(self._heartbeat, callback_time=30_000)
 
     def _send_package(self, package: Package):
         data = package.pack()
@@ -76,60 +78,10 @@ class LiveRoom:
         log.debug("send authentication package.")
         self._send_package(package)
 
-    def discard_message(self, cmd: str, msg: bytes):
-        log.debug(f"discard message of {cmd}.")
+    async def update_info(self, room_id: Optional[int] = None):
+        if room_id is not None:
+            self.room_or_short_id = room_id
 
-    async def dispatch_message(self, msg: bytes):
-        data = json.loads(msg)
-        cmd: str = data["cmd"]
-
-        if cmd in self._handlers:
-            handler = self._handlers[cmd]
-            if (result := handler(msg)) and isinstance(result, Awaitable):
-                await result
-            return
-
-        self.discard_message(cmd, msg)
-
-    def handle(
-        self, cmd: MessageType, handler: Union[MessageHandler, AsyncMessageHandler]
-    ):
-        self._handlers[cmd] = handler
-
-    async def connect(self):
-        if not hasattr(self, "info"):
-            await self.update_info()
-
-        log.debug(f"connect to live room {self.info.room_id}")
-        self._conn = await websocket_connect(BROADCAST_LIVE_URL)
-        self._authentication()
-
-        while True:
-            data = await self._conn.read_message()
-            if data is None:
-                if self._heartbeat_timer.is_running():
-                    self._heartbeat_timer.stop()
-                self._conn.close()
-                raise RoomDisconnectException(self.room_or_short_id)
-
-            if isinstance(data, str):
-                data = data.encode()
-
-            for package in Package.unpack(data):
-                if package.operation == PackageOperation.CONNECT_SUCCESS:
-                    log.debug("connection success.")
-                    if not self._heartbeat_timer.is_running():
-                        self._heartbeat_timer.start()
-                elif package.operation == PackageOperation.HEARTBEAT_REPLY:
-                    (v,) = struct.unpack("!i", package.data)
-                    log.debug(f"hot is {v}")
-                    self.hot = v
-                elif package.operation == PackageOperation.MESSAGE:
-                    await self.dispatch_message(package.data)
-                else:
-                    log.warning(f"unknow operation code {package.operation}.")
-
-    async def update_info(self):
         log.debug("get live room info.")
         url = ROOM_INFO_API_URL.format(self.room_or_short_id)
 
@@ -150,3 +102,54 @@ class LiveRoom:
             info["live_status"],
             datetime.fromtimestamp(info["live_start_time"]),
         )
+
+    async def connect(self):
+        if not hasattr(self, "info"):
+            await self.update_info()
+
+        log.debug(f"connect to live room {self.info.room_id}")
+        self._conn = await websocket_connect(BROADCAST_LIVE_URL)
+        self._authentication()
+
+        while True:
+            data = await self._conn.read_message()
+            if data is None:
+                if self._hb_timer.is_running():
+                    self._hb_timer.stop()
+                self._conn.close()
+                raise RoomDisconnectException(self.room_or_short_id)
+
+            if isinstance(data, str):
+                data = data.encode()
+
+            for package in Package.unpack(data):
+                if package.operation == PackageOperation.CONNECT_SUCCESS:
+                    log.debug("connection success.")
+                    if not self._hb_timer.is_running():
+                        self._hb_timer.start()
+                elif package.operation == PackageOperation.HEARTBEAT_REPLY:
+                    (v, ) = struct.unpack("!i", package.data)
+                    log.debug(f"hot is {v}")
+                    self.hot = v
+                elif package.operation == PackageOperation.MESSAGE:
+                    await self.dispatch_message(package.data)
+                else:
+                    log.warning(f"unknow operation code {package.operation}.")
+
+    async def dispatch_message(self, msg: bytes):
+        cmd = json.loads(msg)["cmd"]
+        handler = self._handlers[cmd]
+
+        result = handler(msg)
+        if isinstance(result, Awaitable):
+            await result
+
+    def discard_message(self, msg: bytes):
+        cmd = json.loads(msg)["cmd"]
+        log.debug(f"discard message of {cmd}.")
+
+    def on_message(self, cmd: MessageType):
+        def _(handler: Union[MessageHandler, AsyncMessageHandler]):
+            self._handlers[cmd] = handler
+
+        return _
