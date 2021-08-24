@@ -17,7 +17,7 @@ class CoinType(str, Enum):
 
 
 class GuardLevel(int, Enum):
-    无 = 0
+    路人 = 0
     总督 = 1
     提督 = 2
     舰长 = 3

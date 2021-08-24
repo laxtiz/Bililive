@@ -16,9 +16,8 @@ from bililive.exception import RoomDisconnectException, RoomNotFoundException
 from bililive.message import MessageType
 from bililive.package import Package, PackageOperation
 
-Message = bytes
-MessageHandler = Callable[[Message], None]
-AsyncMessageHandler = Callable[[Message], Coroutine[Any, Any, None]]
+MessageHandler = Callable[[bytes], None]
+AsyncMessageHandler = Callable[[bytes], Coroutine[Any, Any, None]]
 
 ROOM_INFO_API_URL = (
     "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id={0}")
